@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    ports:
+      - "8010:8010"
+    volumes:
+      - .:/app
+    environment:
+      - R1_AZURE_AI_ENDPOINT=${R1_AZURE_AI_ENDPOINT}
+      - R1_AZURE_AI_API_KEY=${R1_AZURE_AI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+      - SERPAPI_API_KEY=${SERPAPI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
