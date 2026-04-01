@@ -173,7 +173,7 @@ async def upload_documents(
 
 @app.post("/deepthink")
 async def chat_with_claude(request: ChatRequest):
-    """Chat with Claude Sonnet 4.6 using a specific session with streaming."""
+    """Chat with Claude Sonnet 4.5 (with Mistral fallback) using a specific session with extended thinking and streaming."""
     session = get_session(request.session_id)
 
     session["chat_messages"].append(
@@ -184,7 +184,7 @@ async def chat_with_claude(request: ChatRequest):
         context = session["doc_processor"].search_documents(
             request.message, k=3)
 
-    claude_params = session["inference_agent"].generate_chat_response(
+    llm_params = session["inference_agent"].generate_chat_response(
         session["chat_messages"],
         context=context,
         provider=LLMProvider.CLAUDE
@@ -193,14 +193,74 @@ async def chat_with_claude(request: ChatRequest):
     async def format_stream():
         full_response = ""
 
-        with claude_params["client"].messages.stream(
-            model=claude_params["model"],
-            max_tokens=claude_params["max_tokens"],
-            messages=claude_params["messages"]
-        ) as stream:
-            for text in stream.text_stream:
-                full_response += text
-                yield text
+        # Check if we're using Claude (has thinking) or Mistral (no thinking)
+        is_claude = "thinking" in llm_params
+
+        if is_claude:
+            # Claude streaming with extended thinking
+            current_thinking = ""
+            in_thinking_block = False
+            in_text_block = False
+
+            with llm_params["client"].messages.stream(
+                model=llm_params["model"],
+                max_tokens=llm_params["max_tokens"],
+                thinking=llm_params["thinking"],
+                messages=llm_params["messages"]
+            ) as stream:
+                for chunk in stream:
+                    chunk_str = str(chunk)
+
+                    # Parse thinking block
+                    if "content_block_delta" in chunk_str and "thinking_delta" in chunk_str:
+                        if not in_thinking_block:
+                            in_thinking_block = True
+                            yield "<think>\n"
+
+                        if hasattr(chunk, 'delta') and hasattr(chunk.delta, 'thinking'):
+                            thinking_content = chunk.delta.thinking
+                            current_thinking += thinking_content
+                            yield thinking_content
+
+                    # Detect end of thinking block
+                    elif "content_block_stop" in chunk_str and "thinking" in chunk_str and in_thinking_block:
+                        in_thinking_block = False
+                        yield "\n</think>\n\n"
+
+                    # Parse text block (final answer)
+                    elif "content_block_delta" in chunk_str and "text_delta" in chunk_str:
+                        if not in_text_block:
+                            in_text_block = True
+                            yield "<answer>\n"
+
+                        if hasattr(chunk, 'delta') and hasattr(chunk.delta, 'text'):
+                            text_content = chunk.delta.text
+                            full_response += text_content
+                            yield text_content
+
+                    # Detect end of text block
+                    elif "content_block_stop" in chunk_str and "text" in chunk_str and in_text_block:
+                        in_text_block = False
+                        yield "\n</answer>"
+        else:
+            # Mistral streaming (no extended thinking)
+            # Log fallback for server monitoring (not visible to users)
+            logger.info("Using Mistral fallback for chat completion")
+
+            stream = llm_params["client"].chat.stream(
+                model=llm_params["model"],
+                messages=llm_params["messages"],
+                max_tokens=llm_params["max_tokens"],
+                temperature=llm_params.get("temperature", 0.7)
+            )
+
+            for chunk in stream:
+                if hasattr(chunk, 'data') and chunk.data:
+                    if hasattr(chunk.data, 'choices') and chunk.data.choices:
+                        delta = chunk.data.choices[0].delta
+                        if hasattr(delta, 'content') and delta.content:
+                            full_response += delta.content
+                            yield delta.content
 
         session["chat_messages"].append(
             {"role": "assistant", "content": full_response})

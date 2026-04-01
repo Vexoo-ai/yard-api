@@ -42,7 +42,7 @@ precision, and attention to nuanced details. Always cite the sources provided wh
         logger.info(f"Creating Claude stream for query: {query}")
 
         with claude_client.messages.stream(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-5-20250929",
             max_tokens=8096,
             system=system_message,
             messages=[{"role": "user", "content": user_content}]

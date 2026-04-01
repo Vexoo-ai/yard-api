@@ -1,15 +1,20 @@
 from dotenv import load_dotenv
 import os
 import anthropic
-from mistralai_azure import MistralAzure
+from mistralai import Mistral
 from enum import Enum
+import logging
 
 load_dotenv()
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 class LLMProvider(Enum):
-    CLAUDE = "Claude-Sonnet-4.6"
-    MISTRAL = "Mistral-Nemo"
+    CLAUDE = "Claude-Sonnet-4.5"
+    MISTRAL = "Mistral-Small"
 
 
 class InferenceAgent:
@@ -18,20 +23,18 @@ class InferenceAgent:
             api_key=os.getenv("ANTHROPIC_API_KEY")
         )
 
-        azure_api_key = os.getenv("AZURE_AI_API_KEY")
-        azure_endpoint = os.getenv("AZURE_AI_ENDPOINT")
-
-        if azure_api_key and azure_endpoint:
-            self.mistral_client = MistralAzure(
-                azure_api_key=azure_api_key,
-                azure_endpoint=azure_endpoint
-            )
+        # Initialize open Mistral client as fallback
+        mistral_api_key = os.getenv("MISTRAL_API_KEY")
+        if mistral_api_key:
+            self.mistral_client = Mistral(api_key=mistral_api_key)
+            logger.info("Mistral client initialized as fallback")
         else:
             self.mistral_client = None
+            logger.warning("MISTRAL_API_KEY not found. Fallback to Mistral will be disabled.")
 
         self.models = {
-            LLMProvider.CLAUDE: "claude-sonnet-4-6",
-            LLMProvider.MISTRAL: "azureai"
+            LLMProvider.CLAUDE: "claude-sonnet-4-5-20250929",
+            LLMProvider.MISTRAL: "mistral-small-latest"
         }
 
     def generate_chat_response(self, messages, context=None, provider=LLMProvider.CLAUDE):
@@ -69,13 +72,31 @@ class InferenceAgent:
                     messages,
                     f"{chat_history}\n{context_str}"
                 )
-            else:
+            elif provider == LLMProvider.MISTRAL:
                 return self._prepare_mistral_chat_response(
                     system_message,
                     messages,
                     f"{chat_history}\n{context_str}"
                 )
+            else:
+                return self._prepare_claude_chat_response(
+                    system_message,
+                    messages,
+                    f"{chat_history}\n{context_str}"
+                )
         except Exception as e:
+            # If Claude fails and Mistral is available, try fallback
+            if provider == LLMProvider.CLAUDE and self.mistral_client:
+                logger.warning(f"Claude failed: {str(e)}. Falling back to Mistral.")
+                try:
+                    return self._prepare_mistral_chat_response(
+                        system_message,
+                        messages,
+                        f"{chat_history}\n{context_str}"
+                    )
+                except Exception as mistral_error:
+                    logger.error(f"Mistral fallback also failed: {str(mistral_error)}")
+                    raise Exception(f"Both Claude and Mistral failed. Claude error: {str(e)}, Mistral error: {str(mistral_error)}")
             raise Exception(f"Error during chat inference: {str(e)}")
 
     def _prepare_claude_chat_response(self, system_message, messages, context_str):
@@ -95,13 +116,18 @@ class InferenceAgent:
             "client": self.anthropic_client,
             "model": self.models[LLMProvider.CLAUDE],
             "messages": claude_messages,
-            "max_tokens": 8096,
+            "max_tokens": 20000,
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 16000
+            }
         }
 
     def _prepare_mistral_chat_response(self, system_message, messages, context_str):
+        """Prepare parameters for Mistral chat responses (open Mistral API)"""
         if not self.mistral_client:
             raise Exception(
-                "Mistral Azure client is not configured. Check AZURE_AI_API_KEY and AZURE_AI_ENDPOINT."
+                "Mistral client is not configured. Check MISTRAL_API_KEY environment variable."
             )
 
         mistral_messages = [{"role": "system", "content": system_message}]
@@ -113,8 +139,14 @@ class InferenceAgent:
                     {"role": "user", "content": user_content})
             else:
                 if msg["role"] in ["user", "assistant"]:
+                    # Clean up thinking tags from assistant messages
+                    content = msg["content"]
+                    if msg["role"] == "assistant" and "<think>" in content:
+                        content = content.split("</think>")[-1].strip()
+                        if "<answer>" in content:
+                            content = content.replace("<answer>", "").replace("</answer>", "").strip()
                     mistral_messages.append(
-                        {"role": msg["role"], "content": msg["content"]})
+                        {"role": msg["role"], "content": content})
 
         return {
             "client": self.mistral_client,
