@@ -1,27 +1,51 @@
-fastapi
-uvicorn
-python-multipart
-python-dotenv
-azure-ai-inference
-azure-core
-pandas
-pillow
-python-docx
-openpyxl
-python-pptx
-PyPDF2
-boto3
-anthropic
-langchain
-langchain-community
-sentence-transformers
-unstructured
-unstructured-inference
-faiss-cpu
-PyMuPDF
-html2text
-beautifulsoup4
-mistralai
-serpapi==0.1.5
-lightgbm==4.4.0
+# Web framework
+fastapi==0.115.12
+uvicorn==0.34.0
+python-multipart==0.0.20
 
+# Environment & config
+python-dotenv==1.1.0
+
+# Azure AI
+azure-ai-inference==1.0.0b9
+azure-core==1.33.0
+
+# Data processing
+pandas==2.2.3
+pillow==11.2.1
+openpyxl==3.1.5
+numpy==1.26.4
+
+# Document processing
+python-docx==1.1.2
+python-pptx==1.0.2
+PyPDF2==3.0.1
+PyMuPDF==1.25.5
+html2text==2024.2.26
+beautifulsoup4==4.13.3
+
+# ML / Embeddings
+torch==2.2.2
+sentence-transformers==3.4.1
+scikit-learn==1.6.1
+faiss-cpu==1.9.0
+
+# LangChain ecosystem
+langchain==0.3.25
+langchain-community==0.3.23
+langchain-text-splitters==0.3.8
+
+# LLM clients
+# mistralai>=1.0.0 bundles mistralai_azure inside it - do NOT install separately
+anthropic==0.49.0
+mistralai==1.5.2
+
+# AWS
+boto3==1.38.0
+
+# Search & async HTTP
+serpapi==0.1.5
+aiohttp==3.11.18
+
+# Ranking
+lightgbm==4.4.0
