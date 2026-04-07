@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any, Optional
@@ -9,11 +9,13 @@ import tempfile
 import shutil
 from pathlib import Path
 import logging
+import asyncio
 
 from document_processor import DocumentProcessor
 from inference import InferenceAgent, LLMProvider
 from search import call_search_engines
 from claude import call_claude_llm_stream
+from url_downloader import download_urls
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +40,13 @@ app.add_middleware(
 # In-memory session store
 sessions: Dict[str, Dict[str, Any]] = {}
 
+# Supported file extensions (must match DocumentProcessor)
+SUPPORTED_EXTENSIONS = {
+    'xlsx', 'xls', 'pdf', 'ppt', 'pptx', 'docx', 'doc',
+    'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
+    'tiff', 'bmp', 'gif', 'md', 'markdown'
+}
+
 
 # ---------- Pydantic models ----------
 
@@ -50,6 +59,7 @@ class UploadResponse(BaseModel):
     session_id: str
     document_count: int
     chunks_processed: int
+    url_download_summary: Optional[Dict[str, Any]] = None
 
 
 class SerpInput(BaseModel):
@@ -98,6 +108,61 @@ def cleanup_temp_files(files: List[Path]):
                 f"Error removing temporary file {file_path}: {str(e)}")
 
 
+def cleanup_temp_dir(dir_path: str):
+    """Remove an entire temporary directory and its contents."""
+    try:
+        shutil.rmtree(dir_path, ignore_errors=True)
+    except Exception as e:
+        logger.error(
+            f"Error removing temporary directory {dir_path}: {str(e)}")
+
+
+def parse_urls(raw_urls: Optional[str]) -> List[str]:
+    """
+    Parse a comma-separated URL string into a validated list of URLs.
+
+    Strips whitespace, filters empty strings, and validates that each
+    entry starts with http:// or https://.
+
+    Args:
+        raw_urls: Comma-separated URL string, or None.
+
+    Returns:
+        List of validated URL strings. Empty list if input is None/empty.
+
+    Raises:
+        HTTPException 400 if any URL has an invalid format.
+    """
+    if not raw_urls or not raw_urls.strip():
+        return []
+
+    candidates = [u.strip() for u in raw_urls.split(",") if u.strip()]
+
+    for url in candidates:
+        if not url.startswith(("http://", "https://")):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid URL format: '{url}'. "
+                    f"All URLs must start with http:// or https://"
+                )
+            )
+
+    return candidates
+
+
+class FileObject:
+    """Wraps a local file path to mimic an uploaded file for DocumentProcessor."""
+
+    def __init__(self, path: Path, name: str):
+        self.path = path
+        self.name = name
+
+    def getbuffer(self) -> bytes:
+        with open(self.path, "rb") as f:
+            return f.read()
+
+
 # ---------- Routes ----------
 
 @app.get("/health")
@@ -107,11 +172,64 @@ async def health_check():
 
 @app.post("/upload", response_model=UploadResponse)
 async def upload_documents(
-    files: List[UploadFile] = File(...),
-    session_id: Optional[str] = None,
-    background_tasks: BackgroundTasks = None
+    background_tasks: BackgroundTasks,
+    files: Optional[List[UploadFile]] = File(default=None),
+    session_id: Optional[str] = Form(default=None),
+    urls: Optional[str] = Form(default=None),
 ):
-    """Upload and process documents, creating a new session if needed."""
+    """
+    Upload and process documents, creating a new session if needed.
+
+    Accepts uploaded files and/or public document URLs. URLs are
+    downloaded before processing and treated identically to uploaded files.
+
+    Args:
+        files:      Optional list of files to upload directly.
+        session_id: Optional existing session ID to add documents to.
+                    A new session is created if not provided or not found.
+        urls:       Optional comma-separated list of public document URLs.
+
+                    Supported URL types:
+                      - Direct document links (PDF, DOCX, XLSX, PPTX, TXT,
+                        CSV, HTML, PNG, JPG, GIF, BMP, TIFF, MD, etc.)
+                      - ZIP archives (auto-extracted; all supported files
+                        inside are processed individually)
+                      - Google Drive file links:
+                          https://drive.google.com/file/d/FILE_ID/view
+                          https://drive.google.com/open?id=FILE_ID
+                      - Google Drive folder links:
+                          https://drive.google.com/drive/folders/FOLDER_ID
+                          (entire folder downloaded; requires folder to be
+                          publicly shared as "Anyone with the link")
+                      - Dropbox sharing links (dl=0 auto-converted to dl=1)
+                      - OneDrive sharing links (download=1 auto-appended)
+                      - SharePoint sharing links (download=1 auto-appended)
+
+    Returns:
+        UploadResponse with session_id, document_count, chunks_processed,
+        and a url_download_summary showing per-URL results.
+
+    Example urls value:
+        "https://example.com/report.pdf,https://drive.google.com/file/d/ABC/view"
+    """
+    # ── Validate at least one input is provided ──────────────────────────
+    has_files = files is not None and any(
+        hasattr(f, "filename") and f.filename and f.filename.strip()
+        for f in files
+    )
+    parsed_urls = parse_urls(urls)
+    has_urls = len(parsed_urls) > 0
+
+    if not has_files and not has_urls:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No input provided. Supply at least one uploaded file "
+                "or one URL via the 'urls' field."
+            )
+        )
+
+    # ── Session setup ────────────────────────────────────────────────────
     if not session_id or session_id not in sessions:
         session_id = create_new_session()
 
@@ -119,56 +237,133 @@ async def upload_documents(
     doc_processor = session["doc_processor"]
 
     temp_files: List[Path] = []
-    uploaded_files = []
+    uploaded_file_objects: List[FileObject] = []
+    url_download_temp_dir: Optional[str] = None
+    url_file_objects: List[FileObject] = []
 
-    for file in files:
-        try:
-            file_type = file.filename.split('.')[-1].lower()
-            if file_type not in ['xlsx', 'xls', 'pdf', 'ppt', 'pptx', 'docx', 'doc',
-                                 'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
-                                 'tiff', 'bmp', 'gif']:
-                logger.warning(f"Skipping unsupported file type: {file_type}")
+    # Tracks per-URL outcome for the response summary
+    url_summary: Dict[str, Any] = {
+        "total_requested": len(parsed_urls),
+        "total_files_downloaded": 0,
+        "failed_urls": [],
+        "downloaded_files": [],
+    }
+
+    # ── Process uploaded files ───────────────────────────────────────────
+    if has_files and files:
+        for file in files:
+            # Skip Swagger UI empty-string placeholders
+            if not hasattr(file, "filename") or not file.filename or not file.filename.strip():
                 continue
 
-            temp_path = create_temp_file(file)
-            temp_files.append(temp_path)
+            file_ext = file.filename.split('.')[-1].lower()
+            if file_ext not in SUPPORTED_EXTENSIONS:
+                logger.warning(
+                    f"Skipping unsupported file type: {file_ext} "
+                    f"(file: {file.filename})"
+                )
+                continue
 
-            class FileObject:
-                def __init__(self, path: Path, name: str):
-                    self.path = path
-                    self.name = name
+            try:
+                temp_path = create_temp_file(file)
+                temp_files.append(temp_path)
+                uploaded_file_objects.append(
+                    FileObject(temp_path, file.filename)
+                )
+            except Exception as e:
+                cleanup_temp_files(temp_files)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error saving uploaded file '{file.filename}': {str(e)}"
+                )
 
-                def getbuffer(self):
-                    with open(self.path, "rb") as f:
-                        return f.read()
+    # ── Download URL files ───────────────────────────────────────────────
+    if has_urls:
+        # Use a dedicated temp directory for URL downloads so we can clean
+        # it up as a single unit regardless of how many files were extracted
+        url_download_temp_dir = tempfile.mkdtemp(prefix="url_dl_")
 
-            uploaded_files.append(FileObject(temp_path, file.filename))
-
+        try:
+            local_paths = await download_urls(
+                urls=parsed_urls,
+                target_dir=url_download_temp_dir
+            )
         except Exception as e:
-            cleanup_temp_files(temp_files)
-            raise HTTPException(
-                status_code=400,
-                detail=f"Error processing file {file.filename}: {str(e)}"
+            # download_urls itself shouldn't raise — but guard anyway
+            logger.error(f"Unexpected error from download_urls: {e}")
+            local_paths = []
+
+        # Wrap each downloaded file in a FileObject for DocumentProcessor
+        for local_path in local_paths:
+            basename = os.path.basename(local_path)
+            file_ext = os.path.splitext(basename)[1].lstrip('.').lower()
+
+            if file_ext not in SUPPORTED_EXTENSIONS:
+                logger.warning(
+                    f"URL-downloaded file has unsupported extension, "
+                    f"skipping: {basename}"
+                )
+                continue
+
+            url_file_objects.append(FileObject(Path(local_path), basename))
+            url_summary["downloaded_files"].append(basename)
+
+        url_summary["total_files_downloaded"] = len(url_file_objects)
+
+        # Flag if fewer files came back than URLs requested
+        # (ZIPs and folders expand to many files so an exact 1:1 match
+        # is not expected — we just surface a note when nothing arrived)
+        if len(local_paths) == 0 and len(parsed_urls) > 0:
+            url_summary["failed_urls"] = parsed_urls
+        elif len(local_paths) < len(parsed_urls):
+            url_summary["note"] = (
+                f"{len(parsed_urls)} URL(s) requested, "
+                f"{len(local_paths)} file(s) downloaded. "
+                f"Some URLs may have failed — check server logs for details."
             )
 
-    try:
-        chunks_processed = doc_processor.process_documents(uploaded_files)
-        session["document_count"] += len(uploaded_files)
+    # ── Combine all file objects ─────────────────────────────────────────
+    all_file_objects = uploaded_file_objects + url_file_objects
 
-        if background_tasks:
-            background_tasks.add_task(cleanup_temp_files, temp_files)
-        else:
-            cleanup_temp_files(temp_files)
+    if not all_file_objects:
+        # Clean up before raising
+        cleanup_temp_files(temp_files)
+        if url_download_temp_dir:
+            background_tasks.add_task(cleanup_temp_dir, url_download_temp_dir)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No processable files found. Uploaded files may have "
+                "unsupported extensions, and/or all URL downloads may have "
+                "failed. Check server logs for per-URL error details."
+            )
+        )
+
+    # ── Process documents ────────────────────────────────────────────────
+    try:
+        chunks_processed = doc_processor.process_documents(all_file_objects)
+        session["document_count"] += len(all_file_objects)
+
+        # Schedule cleanup of all temp resources after response is sent
+        background_tasks.add_task(cleanup_temp_files, temp_files)
+        if url_download_temp_dir:
+            background_tasks.add_task(cleanup_temp_dir, url_download_temp_dir)
 
         return UploadResponse(
             session_id=session_id,
             document_count=session["document_count"],
-            chunks_processed=chunks_processed
+            chunks_processed=chunks_processed,
+            url_download_summary=url_summary if has_urls else None
         )
+
     except Exception as e:
         cleanup_temp_files(temp_files)
+        if url_download_temp_dir:
+            cleanup_temp_dir(url_download_temp_dir)
         raise HTTPException(
-            status_code=500, detail=f"Error processing documents: {str(e)}")
+            status_code=500,
+            detail=f"Error processing documents: {str(e)}"
+        )
 
 
 @app.post("/deepthink")
