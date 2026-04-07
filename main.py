@@ -1,7 +1,7 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from pydantic import BaseModel
 import uuid
 import os
@@ -173,7 +173,7 @@ async def health_check():
 @app.post("/upload", response_model=UploadResponse)
 async def upload_documents(
     background_tasks: BackgroundTasks,
-    files: Optional[List[UploadFile]] = File(default=None),
+    files: Optional[List[Union[UploadFile, str]]] = File(default=None),
     session_id: Optional[str] = Form(default=None),
     urls: Optional[str] = Form(default=None),
 ):
@@ -213,10 +213,19 @@ async def upload_documents(
         "https://example.com/report.pdf,https://drive.google.com/file/d/ABC/view"
     """
     # ── Validate at least one input is provided ──────────────────────────
-    has_files = files is not None and any(
-        hasattr(f, "filename") and f.filename and f.filename.strip()
-        for f in files
-    )
+    # When curl sends -F 'files=' FastAPI receives an empty string instead
+    # of None or a valid UploadFile. We filter those out here so the rest
+    # of the handler only ever sees real UploadFile objects.
+    valid_files: List[UploadFile] = []
+    if files:
+        for f in files:
+            if isinstance(f, str):
+                # Empty string placeholder from curl/Swagger — skip silently
+                continue
+            if hasattr(f, "filename") and f.filename and f.filename.strip():
+                valid_files.append(f)
+
+    has_files = len(valid_files) > 0
     parsed_urls = parse_urls(urls)
     has_urls = len(parsed_urls) > 0
 
@@ -250,11 +259,8 @@ async def upload_documents(
     }
 
     # ── Process uploaded files ───────────────────────────────────────────
-    if has_files and files:
-        for file in files:
-            # Skip Swagger UI empty-string placeholders
-            if not hasattr(file, "filename") or not file.filename or not file.filename.strip():
-                continue
+    if has_files:
+        for file in valid_files:
 
             file_ext = file.filename.split('.')[-1].lower()
             if file_ext not in SUPPORTED_EXTENSIONS:
