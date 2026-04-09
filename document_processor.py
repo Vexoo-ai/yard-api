@@ -29,7 +29,7 @@ ALLOWED_FILE_TYPES = [
     'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
     'tiff', 'bmp', 'gif'
 ]
-FILE_UPLOAD_LIMIT = int(os.getenv('FILE_UPLOAD_LIMIT', 50))
+FILE_UPLOAD_LIMIT = int(os.getenv('FILE_UPLOAD_LIMIT', 20))
 
 
 class DocumentConverter:
