@@ -24,6 +24,12 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("DocumentProcessor")
+ALLOWED_FILE_TYPES = [
+    'xlsx', 'xls', 'pdf', 'ppt', 'pptx', 'docx', 'doc',
+    'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
+    'tiff', 'bmp', 'gif', 'md', 'markdown'
+]
+FILE_UPLOAD_LIMIT = int(os.getenv('FILE_UPLOAD_LIMIT', 20))
 
 
 class DocumentConverter:
@@ -441,11 +447,6 @@ class DocumentProcessor:
 
         for file in files:
             file_type = file.name.split('.')[-1].lower()
-            if file_type not in ['xlsx', 'xls', 'pdf', 'ppt', 'pptx', 'docx', 'doc',
-                                 'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
-                                 'tiff', 'bmp', 'gif']:
-                logger.warning(f"Unsupported file type: {file_type}, skipping")
-                continue
             file_path = self.save_file_temporarily(file.getbuffer(), file.name)
             file_infos.append((file_path, file_type))
 
