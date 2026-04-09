@@ -31,9 +31,11 @@ app = FastAPI(
 
 _ACCEPT = "." + ",.".join(ALLOWED_FILE_TYPES)
 
+
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui():
-    html = get_swagger_ui_html(openapi_url="/openapi.json", title="AI Assistant API").body.decode()
+    html = get_swagger_ui_html(
+        openapi_url="/openapi.json", title="AI Assistant API").body.decode()
     script = f"""
 <script>
 (function () {{
@@ -203,12 +205,12 @@ async def upload_documents(
 
     invalid_files = [
         file.filename for file in files
-        if file.filename.split('.')[-1].lower() not in ALLOWED_FILE_TYPES
+        if file.filename.split('.')[-1].lower() not in SUPPORTED_EXTENSIONS
     ]
     if invalid_files:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file type(s): {', '.join(invalid_files)}. Allowed formats: {', '.join(ALLOWED_FILE_TYPES)}."
+            detail=f"Unsupported file type(s): {', '.join(invalid_files)}. Allowed formats: {', '.join(SUPPORTED_EXTENSIONS)}."
         )
 
     if not session_id or session_id not in sessions:
