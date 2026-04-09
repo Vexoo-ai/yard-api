@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.openapi.docs import get_swagger_ui_html
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import uuid
@@ -10,7 +11,7 @@ import shutil
 from pathlib import Path
 import logging
 
-from document_processor import DocumentProcessor
+from document_processor import DocumentProcessor, ALLOWED_FILE_TYPES, FILE_UPLOAD_LIMIT
 from inference import InferenceAgent, LLMProvider
 from search import call_search_engines
 from claude import call_claude_llm_stream
@@ -24,8 +25,30 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="AI Assistant API",
     description="API for processing documents, chatting with LLMs, and web search integration",
-    version="1.0.0"
+    version="1.0.0",
+    docs_url=None,  # disable default /docs so we can serve a custom one
 )
+
+_ACCEPT = "." + ",.".join(ALLOWED_FILE_TYPES)
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui():
+    html = get_swagger_ui_html(openapi_url="/openapi.json", title="AI Assistant API").body.decode()
+    script = f"""
+<script>
+(function () {{
+    const ACCEPT = "{_ACCEPT}";
+    new MutationObserver(function () {{
+        document.querySelectorAll('input[type="file"]').forEach(function (el) {{
+            if (!el.getAttribute("accept")) {{
+                el.setAttribute("accept", ACCEPT);
+            }}
+        }});
+    }}).observe(document.body, {{ childList: true, subtree: true }});
+}})();
+</script>"""
+    html = html.replace("</body>", script + "\n</body>")
+    return HTMLResponse(content=html)
 
 # CORS middleware
 app.add_middleware(
@@ -177,6 +200,22 @@ async def upload_documents(
     background_tasks: BackgroundTasks = None
 ):
     """Upload and process documents, creating a new session if needed."""
+    if len(files) > FILE_UPLOAD_LIMIT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many files: {len(files)} uploaded, maximum allowed is {FILE_UPLOAD_LIMIT}."
+        )
+
+    invalid_files = [
+        file.filename for file in files
+        if file.filename.split('.')[-1].lower() not in ALLOWED_FILE_TYPES
+    ]
+    if invalid_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type(s): {', '.join(invalid_files)}. Allowed formats: {', '.join(ALLOWED_FILE_TYPES)}."
+        )
+
     if not session_id or session_id not in sessions:
         session_id = create_new_session()
 
@@ -188,13 +227,6 @@ async def upload_documents(
 
     for file in files:
         try:
-            file_type = file.filename.split('.')[-1].lower()
-            if file_type not in ['xlsx', 'xls', 'pdf', 'ppt', 'pptx', 'docx', 'doc',
-                                 'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
-                                 'tiff', 'bmp', 'gif']:
-                logger.warning(f"Skipping unsupported file type: {file_type}")
-                continue
-
             temp_path = create_temp_file(file)
             temp_files.append(temp_path)
 
