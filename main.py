@@ -62,12 +62,7 @@ app.add_middleware(
 # In-memory session store
 sessions: Dict[str, Dict[str, Any]] = {}
 
-# Supported file extensions (must match DocumentProcessor)
-SUPPORTED_EXTENSIONS = {
-    'xlsx', 'xls', 'pdf', 'ppt', 'pptx', 'docx', 'doc',
-    'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
-    'tiff', 'bmp', 'gif', 'md', 'markdown'
-}
+SUPPORTED_EXTENSIONS = set(ALLOWED_FILE_TYPES)
 
 
 # ---------- Pydantic models ----------
