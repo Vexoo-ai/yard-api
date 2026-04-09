@@ -27,7 +27,7 @@ logger = logging.getLogger("DocumentProcessor")
 ALLOWED_FILE_TYPES = [
     'xlsx', 'xls', 'pdf', 'ppt', 'pptx', 'docx', 'doc',
     'txt', 'csv', 'html', 'htm', 'png', 'jpg', 'jpeg',
-    'tiff', 'bmp', 'gif'
+    'tiff', 'bmp', 'gif', 'md', 'markdown'
 ]
 FILE_UPLOAD_LIMIT = int(os.getenv('FILE_UPLOAD_LIMIT', 20))
 
